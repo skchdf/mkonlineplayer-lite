@@ -9,6 +9,16 @@
  
 var lyricArea = $("#lyric");    // 歌词显示容器
 
+// HTML 转义：歌名/歌手/歌词都来自接口，直接拼进 innerHTML 会被当成标签执行（XSS）
+function mkHtmlEscape(str) {
+    return String(str === undefined || str === null ? '' : str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // 在歌词区显示提示语（如歌词加载中、无歌词等）
 function lyricTip(str) {
     lyricArea.html("<li class='lyric-tip'>"+str+"</li>");     // 显示内容
@@ -42,12 +52,12 @@ function lyricCallback(str, tlyric, id) {
     // 显示全部歌词
     var html = [];
     for(var i = 0; i < lines.length; i++) {
-        var txt = lines[i].text;
+        var txt = mkHtmlEscape(lines[i].text);
         if(!txt) txt = "&nbsp;";
         var item = '<span class="lrc-text">' + txt + '</span>';
         // 同一时间点有翻译则一起显示
         if(lines[i].trans) {
-            item += '<span class="lrc-trans">' + lines[i].trans + '</span>';
+            item += '<span class="lrc-trans">' + mkHtmlEscape(lines[i].trans) + '</span>';
         }
         html.push("<li data-no='" + i + "' class='lrc-item'>" + item + "</li>");
     }

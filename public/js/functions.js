@@ -227,9 +227,9 @@ $(function(){
 // 展现系统列表中任意首歌的歌曲信息
 function musicInfo(list, index) {
     var music = musicList[list].item[index];
-    var tempStr = '<span class="info-title">歌名：</span>' + music.name + 
-    '<br><span class="info-title">歌手：</span>' + music.artist + 
-    '<br><span class="info-title">专辑：</span>' + music.album;
+    var tempStr = '<span class="info-title">歌名：</span>' + mkHtmlEscape(music.name) +
+    '<br><span class="info-title">歌手：</span>' + mkHtmlEscape(music.artist) +
+    '<br><span class="info-title">专辑：</span>' + mkHtmlEscape(music.album);
     
     if(list == rem.playlist && index == rem.playid) {   // 当前正在播放这首歌，那么还可以顺便获取一下时长。。
         tempStr += '<br><span class="info-title">时长：</span>' + formatTime(rem.audio[0].duration);
@@ -348,7 +348,7 @@ function downloadLyric(music) {
     $.ajax({
         type: mkPlayer.method,
         url: mkPlayer.api,
-        data: "types=lyric&id=" + music.lyric_id + "&source=" + music.source,
+        data: { types: "lyric", id: music.lyric_id, source: music.source },
         dataType : "jsonp",
         success: function(jsonData){
             layer.close(loading);
@@ -433,33 +433,36 @@ function openDownloadDialog(url, saveName)
 function changeCover(music) {
     var img = music.pic;    // 获取歌曲封面
     var animate = false,imgload = false;
-    
+    // 拼进 url("...") 前把引号转掉，防止封面地址破坏 CSS
+    var cssUrl = function(u) { return 'url("' + String(u).replace(/"/g, '%22') + '")'; };
+
     if(!img) {  // 封面为空
         ajaxPic(music, changeCover);    // 获取歌曲封面图
-        img == "err";    // 暂时用无图像占个位...
+        img = "err";    // 先用无图像占个位，拿到真封面后会再次调用本函数
     }
-    
+
     if(img == "err") {
         img = "images/player_cover.png";
     } else {
         if(mkPlayer.mcoverbg === true && rem.isMobile)      // 移动端封面
-        {    
-            $("#music-cover").load(function(){
-                $("#mobile-blur").css('background-image', 'url("' + img + '")');
+        {
+            // off 先摘掉上一首歌绑的处理函数，否则监听会越积越多、旧封面反复重绘
+            $("#music-cover").off('load.cover').on('load.cover', function(){
+                $("#mobile-blur").css('background-image', cssUrl(img));
             });
-        } 
+        }
         else if(mkPlayer.coverbg === true && !rem.isMobile)     // PC端封面
-        { 
-            $("#music-cover").load(function(){
+        {
+            $("#music-cover").off('load.cover').on('load.cover', function(){
                 if(animate) {   // 渐变动画也已完成
                     $("#blur-img").backgroundBlur(img);    // 替换图像并淡出
                     $("#blur-img").animate({opacity:"1"}, 2000); // 背景更换特效
                 } else {
                     imgload = true;     // 告诉下面的函数，图片已准备好
                 }
-                
+
             });
-            
+
             // 渐变动画
             $("#blur-img").animate({opacity: "0.2"}, 1000, function(){
                 if(imgload) {   // 如果图片已经加载好了
@@ -471,7 +474,7 @@ function changeCover(music) {
             });
         }
     }
-    
+
     $("#music-cover").attr("src", img);     // 改变右侧封面
     $(".sheet-item[data-no='1'] .sheet-cover").attr('src', img);    // 改变正在播放列表的图像
 }
@@ -551,10 +554,10 @@ function addItem(no, name, auth, album) {
     var html = '<div class="list-item" data-no="' + (no - 1) + '">' +
     '    <span class="list-num">' + no + '</span>' +
     '    <span class="list-mobile-menu"></span>' +
-    '    <span class="music-album">' + album + '</span>' +
-    '    <span class="auth-name">' + auth + '</span>' +
-    '    <span class="music-name">' + name + '</span>' +
-    '</div>'; 
+    '    <span class="music-album">' + mkHtmlEscape(album) + '</span>' +
+    '    <span class="auth-name">' + mkHtmlEscape(auth) + '</span>' +
+    '    <span class="music-name">' + mkHtmlEscape(name) + '</span>' +
+    '</div>';
     rem.mainList.append(html);
 }
 
@@ -617,7 +620,7 @@ function updateMinfo(music) {
         for(var j=0; j<musicList[i].item.length; j++) {
             // ID 对上了，那就更新信息
             if(musicList[i].item[j].id == music.id && musicList[i].item[j].source == music.source) {
-                musicList[i].item[j] == music;  // 更新音乐信息
+                musicList[i].item[j] = music;   // 更新音乐信息
                 j = musicList[i].item.length;   // 一个列表中只找一首，找到了就跳出
             }
         }
@@ -799,5 +802,12 @@ function playerSavedata(key, data) {
 function playerReaddata(key) {
     if(!window.localStorage) return '';
     key = 'mkPlayer2_' + key;
-    return JSON.parse(localStorage.getItem(key));
+    try {
+        var raw = localStorage.getItem(key);
+        return raw === null ? null : JSON.parse(raw);
+    } catch(e) {
+        // 本地记录损坏（手改/旧版本残留）时按没有数据处理，别让播放器起不来
+        try { localStorage.removeItem(key); } catch(e2) {}
+        return null;
+    }
 }

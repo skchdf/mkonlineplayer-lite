@@ -179,9 +179,11 @@ function autoNextMusic() {
 function updateProgress(){
     // 暂停状态不管
     if(rem.paused !== false) return true;
+    // 元数据还没加载完时 duration 是 NaN，别把进度条和歌词刷成 NaN
+    if(!isFinite(rem.audio[0].duration) || !isFinite(rem.audio[0].currentTime)) return true;
     // 同步进度条
 	music_bar.goto(rem.audio[0].currentTime / rem.audio[0].duration);
-    // 同步歌词显示	
+    // 同步歌词显示
 	scrollLyric(rem.audio[0].currentTime);
 }
 
@@ -323,7 +325,10 @@ function play(music) {
     try {
         rem.audio[0].pause();
         rem.audio.attr('src', music.stream || music.url);
-        rem.audio[0].play();
+        // play() 返回 Promise：快速切歌的 AbortError、自动播放被拦的 NotAllowedError
+        // 都走这里吞掉，避免未处理的 Promise 拒绝；真正的加载失败由 audio 的 error 事件处理
+        var p = rem.audio[0].play();
+        if(p && p.catch) p.catch(function(){});
     } catch(e) {
         audioErr(); // 调用错误处理函数
         return;
@@ -344,6 +349,8 @@ console.info('欢迎使用 MKOnlinePlayer!\n当前版本：'+mkPlayer.version+' 
 // 音乐进度条拖动回调函数
 function mBcallback(newVal) {
     var newTime = rem.audio[0].duration * newVal;
+    // duration 未知时 newTime 是 NaN，直接赋给 currentTime 会抛错
+    if(!isFinite(newTime)) return;
     // 应用新的进度
     rem.audio[0].currentTime = newTime;
     refreshLyric(newTime);  // 强制滚动歌词到当前进度

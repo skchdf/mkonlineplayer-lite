@@ -17,9 +17,16 @@ function ajaxSearch() {
     }
     
     $.ajax({
-        type: mkPlayer.method, 
-        url: mkPlayer.api, 
-        data: "types=search&count=" + mkPlayer.loadcount + "&source=netease&pages=" + rem.loadPage + "&name=" + rem.wd,
+        type: mkPlayer.method,
+        url: mkPlayer.api,
+        // 用对象让 jQuery 负责编码，搜索词里的 & + % 等字符才不会把参数切断
+        data: {
+            types: "search",
+            count: mkPlayer.loadcount,
+            source: "netease",
+            pages: rem.loadPage,
+            name: rem.wd
+        },
         dataType : "jsonp",
         complete: function(XMLHttpRequest, textStatus) {
             if(tmpLoading) layer.close(tmpLoading);    // 关闭加载中动画
@@ -117,10 +124,10 @@ function ajaxUrl(music, callback)
         return true;
     }
     
-    $.ajax({ 
-        type: mkPlayer.method, 
+    $.ajax({
+        type: mkPlayer.method,
         url: mkPlayer.api,
-        data: "types=url&id=" + music.id + "&source=" + music.source,
+        data: { types: "url", id: music.id, source: music.source },
         dataType : "jsonp",
         success: function(jsonData){
             // 调试信息输出
@@ -172,10 +179,10 @@ function ajaxPic(music, callback)
         return true;
     }
     
-    $.ajax({ 
-        type: mkPlayer.method, 
+    $.ajax({
+        type: mkPlayer.method,
         url: mkPlayer.api,
-        data: "types=pic&id=" + music.pic_id + "&source=" + music.source,
+        data: { types: "pic", id: music.pic_id, source: music.source },
         dataType : "jsonp",
         success: function(jsonData){
             // 调试信息输出
@@ -220,7 +227,7 @@ function ajaxLyric(music, callback) {
     $.ajax({
         type: mkPlayer.method,
         url: mkPlayer.api,
-        data: "types=lyric&id=" + music.lyric_id + "&source=" + music.source,
+        data: { types: "lyric", id: music.lyric_id, source: music.source },
         dataType : "jsonp",
         success: function(jsonData){
             // 调试信息输出
