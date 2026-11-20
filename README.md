@@ -51,17 +51,19 @@ PORT=9000 HOST=:: node server.mjs
 | 搜索 | `/api.php?types=search&source=netease&name=周杰伦&count=20&pages=1` |
 | 歌曲地址 | `/api.php?types=url&source=netease&id=5257138` |
 | 音频中转 | `/api.php?types=stream&id=5257138` |
+| 下载歌曲 | `/api.php?types=stream&id=5257138&download=1&name=<文件名>` |
 | 封面 | `/api.php?types=pic&source=netease&id=<pic_id>` |
 | 歌词 | `/api.php?types=lyric&source=netease&id=5257138` |
 
 `source` 参数仅为兼容旧客户端保留，传其它值也会按网易云处理。
-歌词接口返回 `{ lyric, tlyric }`；`types=url` 除 `url`（CDN 直链，供下载）外还会返回 `stream`，
-播放器用的是 `stream`。`types=stream` 支持 `Range` 请求，可以拖动进度条。
+歌词接口返回 `{ lyric, tlyric }`；`types=url` 除 `url`（CDN 直链）外还会返回 `stream`，
+播放和下载用的都是 `stream`。`types=stream` 支持 `Range` 请求，可以拖动进度条；
+带 `download=1` 时响应为附件下载，`name` 参数指定保存文件名（中文按 RFC 5987 编码进 `Content-Disposition`）。
 
 ## 目录
 
 ```
-mkplayer/
+mkonlineplayer-lite/
 ├── server.mjs        # 静态托管 + /api.php 适配层
 ├── start.sh          # 启动脚本
 ├── package.json
