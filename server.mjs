@@ -80,24 +80,34 @@ const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Geck
 fs.mkdirSync(AUDIO_DIR, { recursive: true });
 
 let cacheBytes = 0;
-for (const f of fs.readdirSync(AUDIO_DIR)) {
-  if (f.endsWith('.part')) { try { fs.unlinkSync(path.join(AUDIO_DIR, f)); } catch {} continue; }
-  try { cacheBytes += fs.statSync(path.join(AUDIO_DIR, f)).size; } catch {}
-}
 
 const audioPath = (id) => path.join(AUDIO_DIR, `${id}.mp3`);
 const prefetching = new Map();
 
+/** 重新统计缓存总量，超上限按最久未用淘汰（.part 半成品也计入，淘汰后无非重新下） */
 function pruneCache() {
+  cacheBytes = 0;
+  const files = [];
+  for (const f of fs.readdirSync(AUDIO_DIR)) {
+    try {
+      const st = fs.statSync(path.join(AUDIO_DIR, f));
+      cacheBytes += st.size;
+      files.push({ f, size: st.size, t: st.atimeMs || st.mtimeMs });
+    } catch {}
+  }
   if (cacheBytes <= CACHE_LIMIT) return;
-  const files = fs.readdirSync(AUDIO_DIR)
-    .map((f) => { try { const st = fs.statSync(path.join(AUDIO_DIR, f)); return { f, size: st.size, t: st.atimeMs || st.mtimeMs }; } catch { return null; } })
-    .filter(Boolean)
-    .sort((a, b) => a.t - b.t);
+  files.sort((a, b) => a.t - b.t);
   for (const { f, size } of files) {
     if (cacheBytes <= CACHE_LIMIT * 0.9) break;
     try { fs.unlinkSync(path.join(AUDIO_DIR, f)); cacheBytes -= size; } catch {}
   }
+}
+pruneCache();
+
+/** 丢弃未消费的响应体，及时释放连接（晾着不读，undici 迟早报内部错误） */
+function discardBody(resp) {
+  if (!resp?.body) return;
+  try { Promise.resolve(resp.body.cancel()).catch(() => {}); } catch {}
 }
 
 async function resolveAudioUrl(id) {
@@ -107,7 +117,52 @@ async function resolveAudioUrl(id) {
   return u || `https://music.163.com/song/media/outer/url?id=${id}.mp3`;
 }
 
-/** 后台把整首下到本地缓存；同一首并发只下载一次 */
+/** 单次下载尝试；.part 已有内容时发 Range 断点续传（这台机器网络差，整首经常断在 90%） */
+async function downloadOnce(id, url, part, file) {
+  const resumeFrom = (() => { try { return fs.statSync(part).size; } catch { return 0; } })();
+  // 不用 AbortSignal.timeout：它的定时器取消不掉，下载完成后到期照样发迟到 abort，
+  // undici 会在内部流上发无人监听的 error 直接带崩进程
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error('下载超时')), 180000);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      redirect: 'follow',
+      headers: { 'user-agent': UA, ...(resumeFrom > 0 ? { range: `bytes=${resumeFrom}-` } : {}) },
+      signal: ac.signal,
+    });
+    // 416 = .part 比文件本身还大（半成品损坏）：恰好等于总长就收编，否则推倒重来
+    if (resp.status === 416) {
+      discardBody(resp);
+      const total = Number(/^\s*bytes\s+\*\/(\d+)\s*$/i.exec(resp.headers.get('content-range') || '')?.[1]);
+      const st = fs.statSync(part);
+      if (Number.isFinite(total) && st.size === total && st.size >= 8192) {
+        fs.renameSync(part, file);
+        return st.size;
+      }
+      try { fs.unlinkSync(part); } catch {}
+      throw new Error('断点失效 (416)');
+    }
+    if (!resp.ok) { discardBody(resp); throw new Error(`upstream ${resp.status}`); }
+    const ct = resp.headers.get('content-type') || '';
+    if (!/^(audio\/|application\/octet-stream)/.test(ct)) { discardBody(resp); throw new Error(`非音频响应: ${ct}`); }
+    // 上游不理会 Range 回 200 时从头写，不追加
+    const appending = resp.status === 206 && resumeFrom > 0;
+    const src = Readable.fromWeb(resp.body);
+    src.on('error', () => {}); // 断流后 undici 会在流上补发 error，没人听会带崩进程
+    await pipeline(src, fs.createWriteStream(part, { flags: appending ? 'a' : 'w' }));
+    const st = fs.statSync(part);
+    const total = Number(/^\s*bytes\s+\d+-\d+\/(\d+)\s*$/i.exec(resp.headers.get('content-range') || '')?.[1]);
+    if (Number.isFinite(total) && total > 0 && st.size !== total) throw new Error(`长度不符: ${st.size}/${total}`);
+    if (st.size < 8192) throw new Error(`文件过小: ${st.size}`);
+    fs.renameSync(part, file);
+    return st.size;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 后台把整首下到本地缓存；同一首并发只下载一次；中断自动断点续传，最多 3 次 */
 function prefetch(id) {
   const file = audioPath(id);
   try { if (fs.statSync(file).isFile()) return Promise.resolve(file); } catch {}
@@ -117,26 +172,24 @@ function prefetch(id) {
   job = (async () => {
     const t0 = Date.now();
     const url = await resolveAudioUrl(id);
-    const resp = await fetch(url, {
-      redirect: 'follow',
-      headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(180000),
-    });
-    const ct = resp.headers.get('content-type') || '';
-    if (!resp.ok) throw new Error(`upstream ${resp.status}`);
-    if (!/^(audio\/|application\/octet-stream)/.test(ct)) throw new Error(`非音频响应: ${ct}`);
-    await pipeline(Readable.fromWeb(resp.body), fs.createWriteStream(part));
-    const st = fs.statSync(part);
-    if (st.size < 8192) throw new Error(`文件过小: ${st.size}`);
-    fs.renameSync(part, file);
-    cacheBytes += st.size;
+    let size = 0;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        size = await downloadOnce(id, url, part, file);
+        break;
+      } catch (e) {
+        if (attempt >= 3) throw e;
+        console.error('[audio] 下载中断，续传重试', id, `#${attempt}`, e?.message || e);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
     pruneCache();
     const ms = Date.now() - t0;
-    if (ms > 3000) console.log('[audio] 缓存较慢', id, `${(st.size / 1048576).toFixed(1)}MB`, `${ms}ms`);
+    if (ms > 3000) console.log('[audio] 缓存较慢', id, `${(size / 1048576).toFixed(1)}MB`, `${ms}ms`);
     return file;
   })().catch((e) => {
-    try { fs.unlinkSync(part); } catch {}
-    console.error('[audio] 缓存失败', id, e.message);
+    // .part 保留，下次请求接着断点续传
+    console.error('[audio] 缓存失败', id, e?.message || e);
     throw e;
   }).finally(() => prefetching.delete(id));
   prefetching.set(id, job);
@@ -166,7 +219,9 @@ async function serveAudioFile(req, res, file, extraHeaders = {}) {
   if (!range) {
     audioHeaders(res, { status: 200, headers: { 'content-length': st.size, ...extraHeaders } });
     if (req.method === 'HEAD') return res.end();
-    return pipeline(fs.createReadStream(file), res).catch(() => {});
+    const rs = fs.createReadStream(file);
+    rs.on('error', () => {});
+    return pipeline(rs, res).catch(() => {});
   }
   const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
   // bytes=-N 语义是"最后 N 个字节"，不是 0..N
@@ -201,19 +256,24 @@ async function serveAudioFile(req, res, file, extraHeaders = {}) {
     },
   });
   if (req.method === 'HEAD') return res.end();
-  return pipeline(fs.createReadStream(file, { start, end }), res).catch(() => {});
+  const rs = fs.createReadStream(file, { start, end });
+  rs.on('error', () => {});
+  return pipeline(rs, res).catch(() => {});
 }
 
 /** 缓存没命中时实时转发上游（含 Range），同时后台继续落盘 */
 async function proxyAudio(req, res, id, extraHeaders = {}) {
   const url = await resolveAudioUrl(id);
   const ac = new AbortController();
-  res.on('close', () => ac.abort());
+  // 只有客户端真的中途断开才中止上游；正常结束后 res 也会触发 close，
+  // 那时再 abort 已完成的 fetch，会在 undici 内部发无人监听的 error 带崩进程
+  res.on('close', () => { if (!res.writableEnded) ac.abort(); });
   const headers = { 'user-agent': UA };
   if (req.headers.range) headers.range = req.headers.range;
   const upstream = await fetch(url, { headers, redirect: 'follow', signal: ac.signal });
   const ct = upstream.headers.get('content-type') || '';
   if (!upstream.ok || !/^(audio\/|application\/octet-stream)/.test(ct)) {
+    discardBody(upstream);
     console.error('[audio] 上游异常', id, upstream.status, ct);
     res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
     return res.end('upstream error');
@@ -224,8 +284,12 @@ async function proxyAudio(req, res, id, extraHeaders = {}) {
     if (v) out[k] = v;
   }
   audioHeaders(res, { status: upstream.status, headers: { ...out, ...extraHeaders } });
-  if (req.method === 'HEAD') { ac.abort(); return res.end(); }
-  return pipeline(Readable.fromWeb(upstream.body), res).catch(() => {});
+  // HEAD 不用 ac.abort()：fetch 已完成，再 abort 是 undici 迟到 abort 的来源之一；
+  // 丢弃 body 释放连接即可
+  if (req.method === 'HEAD') { discardBody(upstream); return res.end(); }
+  const src = Readable.fromWeb(upstream.body);
+  src.on('error', () => {}); // 断流后 undici 会在流上补发 error，没人听会带崩进程
+  return pipeline(src, res).catch(() => {});
 }
 
 async function handleStream(req, res, id, extraHeaders = {}) {
@@ -392,7 +456,10 @@ const server = http.createServer(async (req, res) => {
       'content-length': st.size,
     });
     if (req.method === 'HEAD') return res.end();
-    pipeline(fs.createReadStream(file), res).catch(() => {}); // 客户端断开/读盘失败只断流，不崩进程
+    const rs = fs.createReadStream(file);
+    rs.on('error', () => res.destroy()); // 读盘失败：掐掉响应，不崩进程
+    res.on('close', () => rs.destroy()); // 客户端中途关页面就别再读盘了
+    pipeline(rs, res).catch(() => {});   // 客户端断开只断流
   });
 });
 
@@ -410,10 +477,14 @@ server.on('error', (e) => {
 server.headersTimeout = 30000;
 server.requestTimeout = 60000;
 
-// 兜底：任何漏网的异步错误只记日志，不让自托管进程直接退出
-process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e?.stack || e));
-process.on('uncaughtException', (e) => console.error('[uncaughtException]', e?.stack || e));
-
+// 兜底：undici 在连接被掐断时会在内部流上发 error（如 UND_ERR_RES_CONTENT_LENGTH_MISMATCH），
+// 那个流用户代码拿不到引用，没人监听就直接带崩整个进程。记录后继续跑，别让播放器掉线。
+process.on('uncaughtException', (e) => {
+  console.error('[fatal-ignored]', e?.stack || e);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[rejection-ignored]', e?.stack || e);
+});
 const listenOptions = HOST === '::'
   ? { port: PORT, host: HOST, ipv6Only: false } // 双栈
   : { port: PORT, host: HOST };
