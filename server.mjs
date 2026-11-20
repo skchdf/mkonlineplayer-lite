@@ -162,13 +162,29 @@ async function serveAudioFile(req, res, file) {
     return pipeline(fs.createReadStream(file), res).catch(() => {});
   }
   const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
-  let start = m && m[1] ? Number(m[1]) : 0;
-  let end = m && m[2] ? Number(m[2]) : st.size - 1;
-  if (!m || Number.isNaN(start) || Number.isNaN(end) || start > end || start >= st.size) {
-    res.writeHead(416, { 'content-range': `bytes */${st.size}` });
+  // bytes=-N 语义是"最后 N 个字节"，不是 0..N
+  let start, end;
+  if (!m || (m[1] === '' && m[2] === '')) {
+    res.writeHead(416, { 'content-type': 'audio/mpeg', 'content-range': `bytes */${st.size}` });
     return res.end();
   }
-  end = Math.min(end, st.size - 1);
+  if (m[1] === '') {
+    const n = Number(m[2]);
+    if (!Number.isFinite(n) || n <= 0) {
+      res.writeHead(416, { 'content-type': 'audio/mpeg', 'content-range': `bytes */${st.size}` });
+      return res.end();
+    }
+    start = Math.max(0, st.size - n);
+    end = st.size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] !== '' ? Number(m[2]) : st.size - 1;
+    if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= st.size) {
+      res.writeHead(416, { 'content-type': 'audio/mpeg', 'content-range': `bytes */${st.size}` });
+      return res.end();
+    }
+    end = Math.min(end, st.size - 1);
+  }
   audioHeaders(res, {
     status: 206,
     headers: {
@@ -245,9 +261,9 @@ async function handleApi(q) {
       return data || [];
     }
     case 'url': {
-      const data = await call('url', q.get('id'), 320);
+      const id = q.get('id') || '';
+      const data = await call('url', id, 320);
       const url = fixUrl(data?.url || '');
-      const id = q.get('id');
       return {
         url,
         // 播放走中转地址：局域网设备不直连 CDN，且第二次起命中本地缓存
@@ -294,7 +310,17 @@ function readBody(req, limit = 1 << 20) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  // 客户端中途断开是常态（手机锁屏、切歌），不能让它变成未处理的 'error' 事件把进程带崩
+  req.on('error', () => {});
+  res.on('error', () => {});
+
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  } catch {
+    // Host 头或请求行非法：按 400 处理，而不是抛异常
+    return send(res, 400, JSON.stringify({ error: 'bad request' }), { 'content-type': 'application/json; charset=utf-8' });
+  }
 
   if (url.pathname === '/api.php' || url.pathname === '/api') {
     const t0 = Date.now();
@@ -336,7 +362,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 静态文件
-  let p = decodeURIComponent(url.pathname);
+  let p;
+  try {
+    p = decodeURIComponent(url.pathname);
+  } catch {
+    // /foo%zz 这类非法百分号编码：按 400 处理，而不是 URIError 崩掉进程
+    return send(res, 400, 'bad request');
+  }
   if (p === '/') p = '/index.html';
   const file = path.join(ROOT, path.normalize(p).replace(/^(\.\.[/\\])+/, ''));
   if (!file.startsWith(ROOT)) return send(res, 403, 'forbidden');
@@ -346,9 +378,28 @@ const server = http.createServer(async (req, res) => {
       'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
       'content-length': st.size,
     });
-    fs.createReadStream(file).pipe(res);
+    if (req.method === 'HEAD') return res.end();
+    pipeline(fs.createReadStream(file), res).catch(() => {}); // 客户端断开/读盘失败只断流，不崩进程
   });
 });
+
+// 监听失败（端口被占用、权限不足等）给出明确提示再退出
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用，请换一个：PORT=其他端口 node server.mjs`);
+  } else {
+    console.error('服务器错误:', e.message);
+  }
+  process.exit(1);
+});
+
+// 收请求本身加超时，防止僵尸连接占着 socket
+server.headersTimeout = 30000;
+server.requestTimeout = 60000;
+
+// 兜底：任何漏网的异步错误只记日志，不让自托管进程直接退出
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e?.stack || e));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e?.stack || e));
 
 const listenOptions = HOST === '::'
   ? { port: PORT, host: HOST, ipv6Only: false } // 双栈
