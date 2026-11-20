@@ -532,6 +532,39 @@ body:before {
     color: #31c27c;
     opacity: .75;
 }
+/* 正在播放的歌词：流动彩虹（颜色沿句子持续滑动） */
+/* 用 @supports 保护：不支持 background-clip:text 的浏览器保持上面的绿色 */
+/* 变量值只写 background-image/size 等长属性，不用简写——简写会把 clip 重置掉 */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    #lyric .lplaying .lrc-text,
+    #lyric .lplaying .lrc-trans {
+        background-image: linear-gradient(90deg,#ff5656,#ff9f43,#ffe24d,#4cd964,#34c7ff,#5a7bff,#b45aff,#ff5656);
+        background-size: 200% 100%;
+        background-repeat: repeat-x;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        -webkit-text-fill-color: transparent;
+        animation: lrc-rainbow-flow 4s linear infinite;
+    }
+    /* 翻译行是块级、宽度撑满整行，收窄到文字宽度并居中，
+       彩虹才会和正文一样铺满自己的文字而不是只露出中段 */
+    #lyric .lplaying .lrc-trans {
+        width: -webkit-fit-content;
+        width: fit-content;
+        margin: 0 auto;
+    }
+    @keyframes lrc-rainbow-flow {
+        to { background-position: 200% 0; }
+    }
+    /* 系统开启"减少动态效果"时退化为静态彩虹 */
+    @media (prefers-reduced-motion: reduce) {
+        #lyric .lplaying .lrc-text,
+        #lyric .lplaying .lrc-trans {
+            animation: none;
+        }
+    }
+}
 /* 歌词显示区显示的提示语(如加载中、无歌词等) */
 .lyric-tip {
     position: absolute;
