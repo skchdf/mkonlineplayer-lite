@@ -1,0 +1,100 @@
+/**************************************************
+ * 深色模式适配
+ *
+ * 播放器本身就是深色界面，这里补齐所有会“漏白”的地方：
+ * layer 弹窗/提示、搜索框、原生表单控件和滚动条。
+ * 需要放在 layer.css 之后加载才能覆盖插件的默认浅色。
+ *************************************************/
+
+:root {
+    color-scheme: dark;
+}
+
+/* ---- layer 弹窗（搜索框 / 歌曲信息 / 提示） ---- */
+.layui-layer {
+    background-color: #1c1b21;
+    box-shadow: 1px 1px 40px rgba(0, 0, 0, .65);
+    color: #e8e6ec;
+}
+.layui-layer-title {
+    background-color: #26252c;
+    color: #e8e6ec;
+    border-bottom: 1px solid #35333d;
+}
+.layui-layer-content {
+    color: #e8e6ec;
+}
+.layui-layer-btn a {
+    background-color: #2b2a32;
+    border-color: #3b3944;
+    color: #e8e6ec;
+}
+.layui-layer-btn .layui-layer-btn0 {
+    background-color: #31c27c;
+    border-color: #31c27c;
+    color: #101014;
+}
+.layui-layer-prompt .layui-layer-input {
+    background-color: #24232a;
+    border-color: #3b3944;
+    color: #e8e6ec;
+    box-shadow: none;
+}
+.layui-layer-msg {
+    background-color: #26252c;
+    border-color: #3b3944;
+    color: #e8e6ec;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, .5);
+}
+.layui-layer-load {
+    background-color: transparent;
+}
+/* 关闭按钮用的是深色精灵图，反相才看得见 */
+.layui-layer-setwin .layui-layer-close1 {
+    -webkit-filter: invert(.85);
+    filter: invert(.85);
+}
+.layui-layer-setwin .layui-layer-min cite {
+    background-color: #d8d6de;
+}
+
+/* ---- 搜索框 ---- */
+#search-area .search-group > input {
+    background-color: #1c1b21;
+    border-color: #3b3944;
+    color: #e8e6ec;
+}
+#search-area .search-group > input::placeholder {
+    color: #8d8a96;
+}
+#search-area .search-group > input:focus {
+    border-color: #31c27c;
+    outline: 0;
+}
+#search-area .search-group > button {
+    background-color: #2b2a32;
+    border-color: #3b3944;
+    color: #e8e6ec;
+}
+#search-area .search-group > button:hover {
+    background-color: #34323c;
+}
+/* Chrome 的自动填充会强行铺白底 */
+#search-wd:-webkit-autofill {
+    -webkit-text-fill-color: #e8e6ec;
+    -webkit-box-shadow: 0 0 0 1000px #1c1b21 inset;
+    caret-color: #e8e6ec;
+}
+
+/* ---- 原生表单控件跟随深色 ---- */
+input, textarea, select, button {
+    color-scheme: dark;
+}
+
+/* ---- 深色系统下空闲背景再压暗一点，夜里不刺眼 ---- */
+@media (prefers-color-scheme: dark) {
+    body:before {
+        -webkit-filter: blur(5px) brightness(.58);
+        filter: blur(5px) brightness(.58);
+    }
+}

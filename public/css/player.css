@@ -73,6 +73,25 @@ body {
     
     overflow: hidden;
 }
+/* 空闲背景：还没播放过歌曲时显示的图片（横版/竖版按屏幕方向选） */
+/* 开始播放后会被封面模糊层完整盖住，暂停时也保持封面，不影响播放态 */
+body:before {
+    content: "";
+    position: fixed;
+    left: -30px;
+    right: -30px;
+    top: -30px;
+    bottom: -30px;
+    background: url("../images/idle-bg-landscape.jpg") center center / cover no-repeat;
+    -webkit-filter: blur(5px) brightness(.68);
+    filter: blur(5px) brightness(.68);
+    pointer-events: none;
+}
+@media (orientation: portrait) {
+    body:before {
+        background-image: url("../images/idle-bg-portrait.jpg");
+    }
+}
 /* 模糊图像层 */
 #blur-img {
     position: fixed;
