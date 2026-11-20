@@ -139,6 +139,7 @@ function ajaxUrl(music, callback)
                 music.url = "err";
             } else {
                 music.url = jsonData.url;    // 记录结果
+                music.stream = jsonData.stream || "";   // 中转播放地址（本地缓存）
             }
             
             updateMinfo(music); // 更新音乐信息

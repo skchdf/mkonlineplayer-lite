@@ -3,16 +3,18 @@
  * MKOnlinePlayer 自托管服务
  * - 静态托管 public/ 里的播放器前端
  * - /api.php 复刻旧版 Meting 的 types 协议，后端用 @meting/core（仅网易云）
- * 用法: node server.mjs   (PORT=8099 HOST=127.0.0.1)
+ * 用法: node server.mjs   (PORT=8888 HOST=127.0.0.1)
  */
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import Meting from '@meting/core';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-const PORT = Number(process.env.PORT || 8099);
+const PORT = Number(process.env.PORT || 8888);
 const HOST = process.env.HOST || '127.0.0.1';
 
 const MIME = {
@@ -20,6 +22,10 @@ const MIME = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
   '.gif': 'image/gif',
   '.ico': 'image/x-icon',
 };
@@ -64,6 +70,159 @@ function withTimeout(promise, ms = 25000) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// ---- 音频中转与本地缓存 ----
+// 局域网的手机等设备不再直连网易云 CDN：统一由本机下载后经局域网转发，
+// 并把整首下到本地，第二次播放起完全不碰外网。CDN 抽风时最多卡第一次。
+const AUDIO_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.cache', 'audio');
+const CACHE_LIMIT = 1.5 * 1024 ** 3;
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
+
+fs.mkdirSync(AUDIO_DIR, { recursive: true });
+
+let cacheBytes = 0;
+for (const f of fs.readdirSync(AUDIO_DIR)) {
+  if (f.endsWith('.part')) { try { fs.unlinkSync(path.join(AUDIO_DIR, f)); } catch {} continue; }
+  try { cacheBytes += fs.statSync(path.join(AUDIO_DIR, f)).size; } catch {}
+}
+
+const audioPath = (id) => path.join(AUDIO_DIR, `${id}.mp3`);
+const prefetching = new Map();
+
+function pruneCache() {
+  if (cacheBytes <= CACHE_LIMIT) return;
+  const files = fs.readdirSync(AUDIO_DIR)
+    .map((f) => { try { const st = fs.statSync(path.join(AUDIO_DIR, f)); return { f, size: st.size, t: st.atimeMs || st.mtimeMs }; } catch { return null; } })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+  for (const { f, size } of files) {
+    if (cacheBytes <= CACHE_LIMIT * 0.9) break;
+    try { fs.unlinkSync(path.join(AUDIO_DIR, f)); cacheBytes -= size; } catch {}
+  }
+}
+
+async function resolveAudioUrl(id) {
+  const data = await call('url', id, 320);
+  const u = fixUrl(data?.url || '');
+  // 拿不到直链时退回老接口，它 302 到 CDN
+  return u || `https://music.163.com/song/media/outer/url?id=${id}.mp3`;
+}
+
+/** 后台把整首下到本地缓存；同一首并发只下载一次 */
+function prefetch(id) {
+  const file = audioPath(id);
+  try { if (fs.statSync(file).isFile()) return Promise.resolve(file); } catch {}
+  let job = prefetching.get(id);
+  if (job) return job;
+  const part = file + '.part';
+  job = (async () => {
+    const t0 = Date.now();
+    const url = await resolveAudioUrl(id);
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      headers: { 'user-agent': UA },
+      signal: AbortSignal.timeout(180000),
+    });
+    const ct = resp.headers.get('content-type') || '';
+    if (!resp.ok) throw new Error(`upstream ${resp.status}`);
+    if (!/^(audio\/|application\/octet-stream)/.test(ct)) throw new Error(`非音频响应: ${ct}`);
+    await pipeline(Readable.fromWeb(resp.body), fs.createWriteStream(part));
+    const st = fs.statSync(part);
+    if (st.size < 8192) throw new Error(`文件过小: ${st.size}`);
+    fs.renameSync(part, file);
+    cacheBytes += st.size;
+    pruneCache();
+    const ms = Date.now() - t0;
+    if (ms > 3000) console.log('[audio] 缓存较慢', id, `${(st.size / 1048576).toFixed(1)}MB`, `${ms}ms`);
+    return file;
+  })().catch((e) => {
+    try { fs.unlinkSync(part); } catch {}
+    console.error('[audio] 缓存失败', id, e.message);
+    throw e;
+  }).finally(() => prefetching.delete(id));
+  prefetching.set(id, job);
+  return job;
+}
+
+function audioHeaders(res, extra) {
+  res.writeHead(extra.status, {
+    'content-type': 'audio/mpeg',
+    'accept-ranges': 'bytes',
+    'cache-control': 'public, max-age=604800',
+    ...extra.headers,
+  });
+}
+
+/** 从本地文件提供音频，支持 Range（拖动进度条） */
+async function serveAudioFile(req, res, file) {
+  const st = await fs.promises.stat(file);
+  const range = req.headers.range;
+  if (!range) {
+    audioHeaders(res, { status: 200, headers: { 'content-length': st.size } });
+    if (req.method === 'HEAD') return res.end();
+    return pipeline(fs.createReadStream(file), res).catch(() => {});
+  }
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+  let start = m && m[1] ? Number(m[1]) : 0;
+  let end = m && m[2] ? Number(m[2]) : st.size - 1;
+  if (!m || Number.isNaN(start) || Number.isNaN(end) || start > end || start >= st.size) {
+    res.writeHead(416, { 'content-range': `bytes */${st.size}` });
+    return res.end();
+  }
+  end = Math.min(end, st.size - 1);
+  audioHeaders(res, {
+    status: 206,
+    headers: {
+      'content-length': end - start + 1,
+      'content-range': `bytes ${start}-${end}/${st.size}`,
+    },
+  });
+  if (req.method === 'HEAD') return res.end();
+  return pipeline(fs.createReadStream(file, { start, end }), res).catch(() => {});
+}
+
+/** 缓存没命中时实时转发上游（含 Range），同时后台继续落盘 */
+async function proxyAudio(req, res, id) {
+  const url = await resolveAudioUrl(id);
+  const ac = new AbortController();
+  res.on('close', () => ac.abort());
+  const headers = { 'user-agent': UA };
+  if (req.headers.range) headers.range = req.headers.range;
+  const upstream = await fetch(url, { headers, redirect: 'follow', signal: ac.signal });
+  const ct = upstream.headers.get('content-type') || '';
+  if (!upstream.ok || !/^(audio\/|application\/octet-stream)/.test(ct)) {
+    console.error('[audio] 上游异常', id, upstream.status, ct);
+    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    return res.end('upstream error');
+  }
+  const out = {};
+  for (const k of ['content-length', 'content-range']) {
+    const v = upstream.headers.get(k);
+    if (v) out[k] = v;
+  }
+  audioHeaders(res, { status: upstream.status, headers: out });
+  if (req.method === 'HEAD') { ac.abort(); return res.end(); }
+  return pipeline(Readable.fromWeb(upstream.body), res).catch(() => {});
+}
+
+async function handleStream(req, res, id) {
+  if (!/^\d+$/.test(String(id))) {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    return res.end('bad id');
+  }
+  const file = audioPath(id);
+  try {
+    if (fs.statSync(file).isFile()) return serveAudioFile(req, res, file);
+  } catch {}
+  // 已缓存就直接用；否则给它几秒钟试着落盘，够快就本地发，慢就边转边下
+  const job = prefetch(id);
+  const ok = await Promise.race([
+    job.then(() => true, () => false),
+    new Promise((r) => setTimeout(() => r(false), 8000)),
+  ]);
+  if (ok && fs.existsSync(file)) return serveAudioFile(req, res, file);
+  return proxyAudio(req, res, id);
+}
+
 function fixUrl(u) {
   if (!u) return '';
   return u
@@ -88,7 +247,14 @@ async function handleApi(q) {
     case 'url': {
       const data = await call('url', q.get('id'), 320);
       const url = fixUrl(data?.url || '');
-      return { url, size: data?.size || 0, br: data?.br || -1 };
+      const id = q.get('id');
+      return {
+        url,
+        // 播放走中转地址：局域网设备不直连 CDN，且第二次起命中本地缓存
+        stream: url ? `/api.php?types=stream&id=${encodeURIComponent(id)}` : '',
+        size: data?.size || 0,
+        br: data?.br || -1,
+      };
     }
     case 'pic': {
       const data = await call('pic', q.get('id'));
@@ -138,6 +304,15 @@ const server = http.createServer(async (req, res) => {
       if (body) new URLSearchParams(body).forEach((v, k) => params.set(k, v));
     }
     const cb = params.get('callback');
+    if (params.get('types') === 'stream') {
+      try {
+        return await handleStream(req, res, params.get('id'));
+      } catch (e) {
+        console.error('[audio]', params.get('id'), e?.message || e);
+        if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+        return res.end('audio error');
+      }
+    }
     let payload;
     try {
       payload = JSON.stringify(await withTimeout(handleApi(params)));
@@ -176,10 +351,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const listenOptions = HOST === '::'
-  ? { port: PORT, host: HOST, ipv6Only: false } // 显式双栈：公网 IPv6 + 局域网 IPv4
+  ? { port: PORT, host: HOST, ipv6Only: false } // 双栈
   : { port: PORT, host: HOST };
 
 server.listen(listenOptions, () => {
-  const displayHost = HOST.includes(':') ? `[${HOST}]` : HOST;
-  console.log(`MKOnlinePlayer 已启动: http://${displayHost}:${PORT}`);
+  console.log(`MKOnlinePlayer 已启动，端口 ${PORT}`);
 });

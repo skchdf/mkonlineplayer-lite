@@ -322,7 +322,7 @@ function play(music) {
     
     try {
         rem.audio[0].pause();
-        rem.audio.attr('src', music.url);
+        rem.audio.attr('src', music.stream || music.url);
         rem.audio[0].play();
     } catch(e) {
         audioErr(); // 调用错误处理函数
