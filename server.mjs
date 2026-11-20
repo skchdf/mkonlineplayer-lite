@@ -152,12 +152,19 @@ function audioHeaders(res, extra) {
   });
 }
 
+/** 组装 Content-Disposition（附件下载；中文等非 ASCII 用 RFC 5987 filename*） */
+function contentDisposition(name) {
+  const safe = String(name || '').replace(/[\\/:*?"<>|\r\n]/g, '_').replace(/\s+/g, ' ').trim() || `song-${Date.now()}`;
+  const ascii = safe.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '_');
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
+}
+
 /** 从本地文件提供音频，支持 Range（拖动进度条） */
-async function serveAudioFile(req, res, file) {
+async function serveAudioFile(req, res, file, extraHeaders = {}) {
   const st = await fs.promises.stat(file);
   const range = req.headers.range;
   if (!range) {
-    audioHeaders(res, { status: 200, headers: { 'content-length': st.size } });
+    audioHeaders(res, { status: 200, headers: { 'content-length': st.size, ...extraHeaders } });
     if (req.method === 'HEAD') return res.end();
     return pipeline(fs.createReadStream(file), res).catch(() => {});
   }
@@ -190,6 +197,7 @@ async function serveAudioFile(req, res, file) {
     headers: {
       'content-length': end - start + 1,
       'content-range': `bytes ${start}-${end}/${st.size}`,
+      ...extraHeaders,
     },
   });
   if (req.method === 'HEAD') return res.end();
@@ -197,7 +205,7 @@ async function serveAudioFile(req, res, file) {
 }
 
 /** 缓存没命中时实时转发上游（含 Range），同时后台继续落盘 */
-async function proxyAudio(req, res, id) {
+async function proxyAudio(req, res, id, extraHeaders = {}) {
   const url = await resolveAudioUrl(id);
   const ac = new AbortController();
   res.on('close', () => ac.abort());
@@ -215,19 +223,19 @@ async function proxyAudio(req, res, id) {
     const v = upstream.headers.get(k);
     if (v) out[k] = v;
   }
-  audioHeaders(res, { status: upstream.status, headers: out });
+  audioHeaders(res, { status: upstream.status, headers: { ...out, ...extraHeaders } });
   if (req.method === 'HEAD') { ac.abort(); return res.end(); }
   return pipeline(Readable.fromWeb(upstream.body), res).catch(() => {});
 }
 
-async function handleStream(req, res, id) {
+async function handleStream(req, res, id, extraHeaders = {}) {
   if (!/^\d+$/.test(String(id))) {
     res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
     return res.end('bad id');
   }
   const file = audioPath(id);
   try {
-    if (fs.statSync(file).isFile()) return serveAudioFile(req, res, file);
+    if (fs.statSync(file).isFile()) return serveAudioFile(req, res, file, extraHeaders);
   } catch {}
   // 已缓存就直接用；否则给它几秒钟试着落盘，够快就本地发，慢就边转边下
   const job = prefetch(id);
@@ -235,8 +243,8 @@ async function handleStream(req, res, id) {
     job.then(() => true, () => false),
     new Promise((r) => setTimeout(() => r(false), 8000)),
   ]);
-  if (ok && fs.existsSync(file)) return serveAudioFile(req, res, file);
-  return proxyAudio(req, res, id);
+  if (ok && fs.existsSync(file)) return serveAudioFile(req, res, file, extraHeaders);
+  return proxyAudio(req, res, id, extraHeaders);
 }
 
 function fixUrl(u) {
@@ -331,8 +339,13 @@ const server = http.createServer(async (req, res) => {
     }
     const cb = params.get('callback');
     if (params.get('types') === 'stream') {
+      // download=1 时作为附件下载；文件名由前端传 name 参数（含中文时用 RFC 5987 编码）
+      const extra = {};
+      if (params.get('download')) {
+        extra['content-disposition'] = contentDisposition(params.get('name') || `song-${params.get('id')}`);
+      }
       try {
-        return await handleStream(req, res, params.get('id'));
+        return await handleStream(req, res, params.get('id'), extra);
       } catch (e) {
         console.error('[audio]', params.get('id'), e?.message || e);
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });

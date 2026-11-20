@@ -318,7 +318,14 @@ function download(music) {
         layer.msg('这首歌不支持下载');
         return;
     }
-    openDownloadDialog(music.url, music.name + ' - ' + music.artist);
+    var name = music.name + ' - ' + music.artist;
+    // 走本机中转下载：<a download> 对跨域地址不生效（文件名会丢、浏览器直接打开），
+    // stream 是同源地址且服务端会带 Content-Disposition(attachment)
+    if(music.stream) {
+        openDownloadDialog(music.stream + '&download=1&name=' + encodeURIComponent(name), name);
+    } else {
+        openDownloadDialog(music.url, name);
+    }
 }
 
 // 下载歌词文件
