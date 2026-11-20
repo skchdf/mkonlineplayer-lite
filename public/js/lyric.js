@@ -25,81 +25,89 @@ function lyricCallback(str, tlyric, id) {
     rem.lyricRaw = str || '';
     rem.lyricTransRaw = tlyric || '';
     
-    rem.lyric = parseLyric(rem.lyricRaw);    // 解析获取到的歌词
+    var lines = parseDisplayLines(rem.lyricRaw);    // 解析获取到的歌词（保留毫秒）
+    rem.lyric = lines;
     
-    if(rem.lyric === '') {
+    if(!lines.length) {
         lyricTip('没有歌词');
+        rem.lastLyric = -1;
         return false;
     }
     
-    // 把翻译按原文行对齐（上游 tlyric 的时间轴有时会整体错位一行）
-    var pairs = pairLyricLines(rem.lyricRaw, rem.lyricTransRaw);
-    var transMap = {};
-    for(var p = 0; p < pairs.length; p++) {
-        if(pairs[p].trans) transMap[Math.floor(pairs[p].sec)] = pairs[p].trans;
-    }
+    attachTranslation(lines, rem.lyricTransRaw);    // 把翻译对到原文行上
     
     lyricArea.html('');     // 清空歌词区域的内容
-    lyricArea.scrollTop(0);    // 滚动到顶部
-    
     rem.lastLyric = -1;
     
     // 显示全部歌词
-    var i = 0;
-    for(var k in rem.lyric){
-        var txt = rem.lyric[k];
+    var html = [];
+    for(var i = 0; i < lines.length; i++) {
+        var txt = lines[i].text;
         if(!txt) txt = "&nbsp;";
-        var html = '<span class="lrc-text">' + txt + '</span>';
+        var item = '<span class="lrc-text">' + txt + '</span>';
         // 同一时间点有翻译则一起显示
-        if(transMap[k] !== undefined && transMap[k] !== '') {
-            html += '<span class="lrc-trans">' + transMap[k] + '</span>';
+        if(lines[i].trans) {
+            item += '<span class="lrc-trans">' + lines[i].trans + '</span>';
         }
-        var li = $("<li data-no='"+i+"' class='lrc-item'>"+html+"</li>");
-        lyricArea.append(li);
-        i++;
+        html.push("<li data-no='" + i + "' class='lrc-item'>" + item + "</li>");
     }
+    lyricArea.html(html.join(''));
+    lyricArea.scrollTop(0);    // 滚动到顶部
+    return true;
+}
+
+// 找出当前时间对应的歌词行号（最后一句 sec <= time）
+// 参数：当前播放时间（单位：秒，可带小数）
+function findLyricIndex(time) {
+    var lines = rem.lyric;
+    if(!lines || !lines.length) return -1;
+    var t = Number(time) || 0;
+    var lo = 0, hi = lines.length - 1, ans = -1;
+    while(lo <= hi) {
+        var mid = (lo + hi) >> 1;
+        if(lines[mid].sec <= t + 0.001) {
+            ans = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return ans;
 }
 
 // 强制刷新当前时间点的歌词
 // 参数：当前播放时间（单位：秒）
 function refreshLyric(time) {
-    if(rem.lyric === '') return false;
-    
-    time = parseInt(time);  // 时间取整
-    var i = 0;
-    for(var k in rem.lyric){
-        if(k >= time) break;
-        i = k;      // 记录上一句的
-    }
-    
-    scrollLyric(i);
+    return scrollLyric(time);
 }
 
 // 滚动歌词到指定句
 // 参数：当前播放时间（单位：秒）
 function scrollLyric(time) {
-    if(rem.lyric === '') return false;
-    
-    time = parseInt(time);  // 时间取整
-    
-    if(rem.lyric === undefined || rem.lyric[time] === undefined) return false;  // 当前时间点没有歌词
-    
-    if(rem.lastLyric == time) return true;  // 歌词没发生改变
-    
-    var i = 0;  // 获取当前歌词是在第几行
-    for(var k in rem.lyric){
-        if(k == time) break;
-        i ++;
-    }
-    rem.lastLyric = time;  // 记录方便下次使用
+    var lines = rem.lyric;
+    if(!lines || !lines.length) return false;
+
+    var idx = findLyricIndex(time);
+    if(idx < 0) return false;               // 还没到第一句
+    if(rem.lastLyric === idx) return true;  // 歌词没发生改变
+
+    var current = $(".lrc-item[data-no='" + idx + "']");
+    if(!current.length) return false;
+
+    rem.lastLyric = idx;    // 记录方便下次使用
     $(".lplaying").removeClass("lplaying");     // 移除其余句子的正在播放样式
-    var current = $(".lrc-item[data-no='" + i + "']");
     current.addClass("lplaying");    // 加上正在播放样式
-    
-    // 按当前歌词项的实际位置滚动（带翻译的歌词项高度不一样）
-    var scroll = current.position().top + current.outerHeight() / 2 - lyricArea.parent().height() / 2;
-    lyricArea.stop().animate({scrollTop: scroll}, 1000);  // 平滑滚动到当前歌词位置(更改这个数值可以改变歌词滚动速度，单位：毫秒)
-    
+
+    // 目标位置必须用“内容坐标”算：
+    // position() 是相对 offsetParent 的，会被 scrollTop 带偏，
+    // 每滚一次目标就少 scrollTop，导致来回乱跳。
+    var target = current.offset().top - lyricArea.offset().top + lyricArea.scrollTop()
+               + current.outerHeight() / 2 - lyricArea.height() / 2;
+    var max = lyricArea[0].scrollHeight - lyricArea[0].clientHeight;
+    if(target > max) target = max;
+    if(target < 0) target = 0;
+    lyricArea.stop().animate({scrollTop: target}, 600);  // 平滑滚动到当前歌词位置(更改这个数值可以改变歌词滚动速度，单位：毫秒)
+    return true;
 }
 
 // 解码歌词中的 URL 编码，解码失败时保留原文
@@ -111,28 +119,70 @@ function safeDecode(str) {
     }
 }
 
-// 解析歌词
-// 这一函数来自 https://github.com/TivonJJ/html5-music-player
-// 参数：原始歌词文件
-function parseLyric(lrc) {
-    if(!lrc) return '';
-    var lyrics = lrc.split("\n");
-    var lrcObj = {};
-    for(var i=0;i<lyrics.length;i++){
-        var lyric = safeDecode(lyrics[i]);
-        var timeReg = /\[\d*:\d*((\.|\:)\d*)*\]/g;
-        var timeRegExpArr = lyric.match(timeReg);
-        if(!timeRegExpArr)continue;
-        var clause = lyric.replace(timeReg,'');
-        for(var k = 0,h = timeRegExpArr.length;k < h;k++) {
-            var t = timeRegExpArr[k];
-            var min = Number(String(t.match(/\[\d*/i)).slice(1)),
-                sec = Number(String(t.match(/\:\d*/i)).slice(1));
-            var time = min * 60 + sec;
-            lrcObj[time] = clause;
+// 这一行是否属于作词/作曲之类的元信息（不是真正要唱的歌词）
+function isLyricMeta(text) {
+    return /^(作词|作曲|编曲|制作人|混音|母带|录音|出品|监制|词|曲)\s*[:：]/.test(text);
+}
+
+// 解析出用于显示的歌词行
+// 返回：[{ sec, text }]，按时间升序；同一行带多个时间标签会展开成多条
+function parseDisplayLines(lrc) {
+    var out = [];
+    var lines = (lrc || '').split(/\r?\n/);
+    for(var i = 0; i < lines.length; i++) {
+        var line = safeDecode(lines[i]);
+        var times = lrcLineTimes(line);
+        if(!times.length) continue;
+        var text = line.replace(/\[(\d+):(\d+)(?:[.:](\d+))?\]/g, '').trim();
+        for(var j = 0; j < times.length; j++) {
+            out.push({ sec: times[j].sec, text: text, trans: null });
         }
     }
-    return lrcObj;
+    out.sort(function(a, b){ return a.sec - b.sec; });
+    return out;
+}
+
+// 把翻译行对到显示的原文行上
+// 行数一致时按顺序配对（上游 tlyric 的时间轴有时会整体错位一行）；
+// 否则按时间戳配对，允许 150ms 误差。
+function attachTranslation(lines, tlyric) {
+    var trans = parseLyricLines(tlyric, true);
+    if(!trans.length) return;
+
+    var targets = [];
+    for(var i = 0; i < lines.length; i++) {
+        if(lines[i].text && !isLyricMeta(lines[i].text)) targets.push(lines[i]);
+    }
+
+    if(targets.length === trans.length) {
+        for(var n = 0; n < targets.length; n++) targets[n].trans = trans[n].text;
+        return;
+    }
+
+    var byMs = {}, keys = [];
+    for(var t = 0; t < trans.length; t++) {
+        for(var j = 0; j < trans[t].times.length; j++) {
+            var k = Math.round(trans[t].times[j].sec * 1000);
+            if(byMs[k] === undefined) { byMs[k] = trans[t].text; keys.push(k); }
+        }
+    }
+    keys.sort(function(a, b){ return a - b; });
+
+    function nearMs(sec) {
+        var target = Math.round(sec * 1000), best = null, bestDiff = 150;
+        for(var i = 0; i < keys.length; i++) {
+            var diff = Math.abs(keys[i] - target);
+            if(diff < bestDiff) { bestDiff = diff; best = keys[i]; }
+            else if(keys[i] > target + 150) break;
+        }
+        return best === null ? null : byMs[best];
+    }
+
+    for(var n = 0; n < lines.length; n++) {
+        if(!lines[n].text) continue;
+        var key = Math.round(lines[n].sec * 1000);
+        lines[n].trans = byMs[key] !== undefined ? byMs[key] : nearMs(lines[n].sec);
+    }
 }
 
 // 提取一行歌词中的所有时间标签及其对应秒数
@@ -160,7 +210,7 @@ function parseLyricLines(lrc, skipMeta) {
         if(!times.length) continue;
         var text = line.replace(/\[(\d+):(\d+)(?:[.:](\d+))?\]/g, '').trim();
         if(!text) continue;
-        if(skipMeta && /^(作词|作曲|编曲|制作人|混音|母带|录音|出品|监制|词|曲)\s*[:：]/.test(text)) continue;
+        if(skipMeta && isLyricMeta(text)) continue;
         
         var rawTags = '';
         for(var j = 0; j < times.length; j++) rawTags += times[j].raw;
