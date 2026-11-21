@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 仓库声明 engines >=18；18 已 EOL，从当前维护线 20 起。
+        node-version: [20, 22, 26]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install
+        run: npm install
+
+      - name: Syntax check
+        run: |
+          node --check server.mjs
+          for f in public/js/ajax.js public/js/functions.js public/js/lyric.js public/js/musicList.js public/js/player.js; do
+            node --check "$f"
+          done
+          bash -n start.sh
+
+      # 上游网易云 API 不可达时相关用例自动 skip，不允许因此变红。
+      - name: Test
+        run: npm test

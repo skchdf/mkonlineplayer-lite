@@ -5,7 +5,8 @@
   "description": "MKOnlinePlayer 的小幅优化改动版：自托管前端 + Meting(Node) 后端，支持歌词翻译与双语 LRC 下载。",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test tests/"
   },
   "engines": {
     "node": ">=18"

@@ -162,6 +162,27 @@ async function downloadOnce(id, url, part, file) {
   }
 }
 
+// ---- 下载并发闸门 ----
+// prefetching Map 只防同一首并发；连点几首不同的歌会同时开几个下载，
+// 弱机上互相抢带宽还会一起超时。这里限全局最多 2 个下载任务，其余排队。
+const MAX_CONCURRENT_DOWNLOADS = 2;
+let activeDownloads = 0;
+const downloadQueue = [];
+
+function acquireDownloadSlot() {
+  if (activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
+    activeDownloads++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => downloadQueue.push(() => { activeDownloads++; resolve(); }));
+}
+
+function releaseDownloadSlot() {
+  activeDownloads--;
+  const next = downloadQueue.shift();
+  if (next) next();
+}
+
 /** 后台把整首下到本地缓存；同一首并发只下载一次；中断自动断点续传，最多 3 次 */
 function prefetch(id) {
   const file = audioPath(id);
@@ -172,18 +193,25 @@ function prefetch(id) {
   job = (async () => {
     const t0 = Date.now();
     const url = await resolveAudioUrl(id);
+    // 开新下载前先看一眼缓存：别等下完才 prune，极端时瞬时占用能远超上限
+    if (cacheBytes > CACHE_LIMIT * 0.9) pruneCache();
     let size = 0;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        size = await downloadOnce(id, url, part, file);
-        break;
-      } catch (e) {
-        if (attempt >= 3) throw e;
-        console.error('[audio] 下载中断，续传重试', id, `#${attempt}`, e?.message || e);
-        await new Promise((r) => setTimeout(r, 2000));
+    await acquireDownloadSlot();
+    try {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          size = await downloadOnce(id, url, part, file);
+          break;
+        } catch (e) {
+          if (attempt >= 3) throw e;
+          console.error('[audio] 下载中断，续传重试', id, `#${attempt}`, e?.message || e);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
       }
+      pruneCache();
+    } finally {
+      releaseDownloadSlot();
     }
-    pruneCache();
     const ms = Date.now() - t0;
     if (ms > 3000) console.log('[audio] 缓存较慢', id, `${(size / 1048576).toFixed(1)}MB`, `${ms}ms`);
     return file;
